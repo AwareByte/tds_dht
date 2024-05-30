@@ -3,22 +3,23 @@ import board
 import adafruit_dht
 from pyiArduinoI2Ctds import *
 import sys
+import threading
+#from queue import Queue
+from collections import deque
+
+array_size = 10
+temperature_queue = deque(maxlen=array_size)
+humidity_queue = deque(maxlen=array_size)
+tds_queue = deque(maxlen=array_size)
+ec_queue = deque(maxlen=array_size)
+
+queue_lock = threading.Lock()
+
 
 def _tds_start():
-    tds = pyiArduinoI2Ctds(None, NO_BEGIN)
-    if len(sys.argv) < 2:
-        newAddress = 0x09
-    else:
-        tmp = int(sys.argv[1])
-        if tmp > 6:
-            newAddress = tmp
-
+    tds = pyiArduinoI2Ctds(0x09, NO_BEGIN)
     if tds.begin():
-        print("Найден датчик " % tds.getAddress())
-        if tds.changeAddress(newAddress):
-                print("Адрес изменён на " % tds.getAddress())
-        else:
-                print("Адрес не изменён!")
+        print("Найден датчик tds")
         return tds
     else:
         print("Датчик не найден!")
@@ -27,62 +28,81 @@ def _tds_start():
 #start connections
 # DHT
 dhtDevice = adafruit_dht.DHT11(board.D4)
-pin = '4'
+print("Найден датчик dht")
 
 # TDS
 tds = _tds_start()
 
-#local variables
-temperature_array = []
-count = 10
-
-
-def find_average(nums):
-    total = 0
-    for num in nums:
-        total += num
-    count = len(nums)
-    average = total / count
-    return average
-
-def measure_temperature(sensor):
+def measure_dht():
     try:
-        value = dhtDevice.temperature
-        print("measured")
+        temperature = dhtDevice.temperature
+        humidity = dhtDevice.humidity
+        if not temperature:
+            temperature = 20
+        if not humidity:
+            humidity = 37
     except:
-        value = 20
-    print("current value ",value)
-    temperature_array.append(value)
-    if len(temperature_array) == count+1:
-        temperature_array = temperature_array[1:]
-    return sum(temperature_array) / count
+        temperature = 20
+        humidity = -1
+    return humidity,temperature
 
-def main():
-    if not dhtDevice:
-        print("dht not found")
-        return
+def measure_tds(temp):
+    try:
+        tds.set_t(temp)
+        tds_value = tds.getTDS()
+        ec_value = tds.getEC()
+    except:
+        # Ошибка
+        tds_value = -1
+        ec_value = -1
+    return tds_value,ec_value
+
+def fill_arrays():
     while True:
-        temperature = measure_temperature(sensor)
-        print(temperature)
+        humidity,temperature = measure_dht();
+        tds_value,ec_value = measure_tds(temperature);
+        with queue_lock:
+            humidity_queue.append(humidity)
+            temperature_queue.append(temperature)
+            tds_queue.append(tds_value)
+            ec_queue.append(ec_value)
+        print("temp ",list(temperature_queue))
+        print("humidity ",list(humidity_queue))
+        print("tds ",list(tds_queue))
+        print("ec ",list(ec_queue))
         time.sleep(1)
 
-main()
+writer_thread = threading.Thread(target=fill_arrays)
+writer_thread.start()
 
-#def main():
-#    check = _start()
-#    if not check:
-#        return
-#    tds, dht = check
-#    while True:
-#        temperature = measure_temperature(dht)
-#        tds.set_t(temperature) # Текущая температура в градусах цельсия
-#        print("Ro="          , end='')
-#        print(tds.getRo()    , end='')
-#        print("Ом, S="       , end='')
-#        print(tds.get_S()    , end='')
-#        print("мкСм/см, EC=" , end='')
-#        print(tds.getEC()    , end='')
-#        print("мкСм/см, TDS=", end='')
-#        print(tds.getTDS()   , end='')               #   Выводим количество растворённых твёрдых веществ в жидкости.
-#        print(" мг/л\r\n"    , end='')
-#        time.sleep(1)
+def get_values():
+    humidity = -1;
+    temperature = -1;
+    tds_value = -1;
+    ec_value = -1;
+    with queue_lock:
+        temperature_arr = list(temperature_queue)
+        humidity_arr = list(humidity_queue)
+        tds_arr = list(tds_queue)
+        ec_arr = list(ec_queue)
+        humidity_arr = [x for x in humidity_arr if x != -1]
+        temperature_arr = [x for x in temperature_arr if x != -1]
+        tds_arr = [x for x in tds_arr if x != -1]
+        ec_arr = [x for x in ec_arr if x != -1]
+        try:
+            humidity = sum(humidity_arr) / len(humidity_arr)
+        except:
+            pass
+        try:
+            temperature = sum(temperature_arr) / len(temperature_arr)
+        except:
+            pass
+        try:
+            tds_value = sum(tds_arr) / len(tds_arr)
+        except:
+            pass
+        try:
+            ec_value = sum(ec_arr) / len(ec_arr)
+        except:
+            pass
+    return temperature,humidity,tds_value,ec_value
